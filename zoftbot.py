@@ -144,7 +144,7 @@ def main():
     user_input = get_text()
     if user_input:
         vectorstore = get_pinconevectorstore(user_input)
-        output = Conversation.run(input=vectorstore)
+        output = Conversation.run(input=str(vectorstore))
         st.session_state.past.append(user_input)
         st.session_state.generated.append(output)
         # output = Conversation.run(input=user_input)  
