@@ -1,15 +1,10 @@
 import streamlit as st
 from dotenv import load_dotenv
-load_dotenv()
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings, HuggingFaceInstructEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.vectorstores import Pinecone
-from langchain.chains import ConversationChain
-from langchain.chains.conversation.memory import ConversationEntityMemory
-from langchain.chains.conversation.prompt import ENTITY_MEMORY_CONVERSATION_TEMPLATE
-from langchain.llms import OpenAI
 import pinecone
 import os
 import pymongo
@@ -20,14 +15,6 @@ from htmlTemplates import css, bot_template, user_template
 from langchain.llms import HuggingFaceHub
 from langchain.chat_models.base import BaseChatModel
 
-if "generated" not in st.session_state:
-    st.session_state["generated"] = []
-if "past" not in st.session_state:
-    st.session_state["past"] = []
-if "input" not in st.session_state:
-    st.session_state["input"] = ""
-if "stored_session" not in st.session_state:
-    st.session_state["stored_session"] = []
 
 class ChatAnthropic(BaseChatModel):
 
@@ -47,17 +34,6 @@ def get_pdf_text(pdf_docs):
         for page in pdf_reader.pages:
             text += page.extract_text()
     return text
-
-def get_text():
-    """
-    Get the user input text.
-    Returns:
-        (str): The text entered by the user
-    """
-    input_text = st.text_input("You: ", st.session_state["input"], key="input",
-                            placeholder="Your AI assistant here! Ask me anything ...", 
-                            label_visibility='hidden')
-    return input_text
 
 
 def get_text_chunks(text):
@@ -80,9 +56,9 @@ def get_vectorstore(text_chunks):
 
 def get_pinconevectorstore(text_chunks):
     pinecone.init(
-        api_key=st.secrets["zoft_pincone_API_KEY"],  # find at app.pinecone.io
+        api_key=os.environ['zoft_pincone_API_KEY'],  # find at app.pinecone.io
         # next to api key in console
-        environment=st.secrets["zoft_pincone_env"],
+        environment=os.environ['zoft_pincone_env'],
     )
     embeddings = OpenAIEmbeddings()
     # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
@@ -90,8 +66,53 @@ def get_pinconevectorstore(text_chunks):
     #     texts=text_chunks, embedding=embeddings, index_name=os.environ['zoft_index_name'])
     # print("vectorstore", vectorstore)
     vectorstore2 = Pinecone.from_existing_index(
-        st.secrets["zoft_index_name"], embeddings)
+        os.environ['zoft_index_name'], embeddings)
     return vectorstore2
+
+
+def get_conversation_chain(vectorstore):
+    llm = ChatOpenAI()
+    # llm = HuggingFaceHub(repo_id="google/flan-t5-xxl", model_kwargs={"temperature":0.5, "max_length":512})
+
+    memory = ConversationBufferMemory(
+        memory_key='chat_history', return_messages=True)
+    conversation_chain = get_conversation_chain_without_verbose(
+        llm=llm,
+        retriever=vectorstore.as_retriever(),
+        memory=memory
+    )
+    return conversation_chain
+
+
+def get_conversation_chain_without_verbose(llm, retriever, memory):
+    return ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        memory=memory
+    )
+
+
+def handle_userinput(user_question):
+    print("handle_userinput", user_question)
+    vectorstore = get_pinconevectorstore(user_question)
+    # print(vectorstore)
+    # create conversation chain
+    st.session_state.conversation = get_conversation_chain(vectorstore)
+    response = st.session_state.conversation({'question': user_question})
+    # print("response", response)
+
+    conversation_item = {"question": user_question, "answer": response['answer']}
+    st.session_state.chat_history.append(conversation_item)
+        
+    # Display chat history
+    st.header("Chat History")
+    if hasattr(st.session_state, "chat_history"):
+        for item in st.session_state.chat_history:
+            st.write("You:", item["question"])
+            st.write("ZoftBot:", item["answer"])
+            st.write("")
+
+
 
 def databasecollection():
     client = pymongo.MongoClient(
@@ -116,6 +137,7 @@ def databasecollection():
     client.close()
     return all_data
 
+
 def main():
     load_dotenv()
     # vector_text = databasecollection()
@@ -127,35 +149,38 @@ def main():
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
     if "chat_history" not in st.session_state:
-        st.session_state.chat_history = None
+        st.session_state.chat_history = []
 
     st.header("ZoftBot :books:")
-    # print(vectorstore)
-    # create conversation chain
-    openai_api_key = st.secrets["OPENAI_API_KEY"]
-    llm = ChatOpenAI(api_key=openai_api_key)
-    if 'entity_memory' not in st.session_state:
-            st.session_state.entity_memory = ConversationEntityMemory(llm=llm, k=10)
-    Conversation = ConversationChain(
-            llm=llm, 
-            prompt=ENTITY_MEMORY_CONVERSATION_TEMPLATE,
-            memory=st.session_state.entity_memory
-        )  
-    user_input = get_text()
-    if user_input:
-        vectorstore = get_pinconevectorstore(user_input)
-        output = Conversation.run(input=str(vectorstore))
-        st.session_state.past.append(user_input)
-        st.session_state.generated.append(output)
-        # output = Conversation.run(input=user_input)  
-        # st.session_state.past.append(user_input)
-        # st.session_state.generated.append(output)
+    user_question = st.text_input("Ask your Doubt:")
+    if user_question:
+        handle_userinput(user_question)
+        # for i, message in enumerate(st.session_state.chat_history):
+        #     if i % 2 == 0:
+        #         st.write(user_template.replace(
+        #             "{{MSG}}", message.content), unsafe_allow_html=True)
+        #     else:
+        #         st.write(bot_template.replace(
+        #             "{{MSG}}", message.content), unsafe_allow_html=True)
 
-    with st.expander("Conversation", expanded=True):
-        for i in range(len(st.session_state['generated'])-1, -1, -1):
-            st.info(st.session_state["past"][i],icon="🧐")
-            st.success(st.session_state["generated"][i], icon="🤖")
+    # with st.sidebar:
+    #     st.subheader("Your documents")
+    #     pdf_docs = st.file_uploader(
+    #         "Upload your PDFs here and click on 'Process'", accept_multiple_files=True)
+    #     if st.button("Process"):
+    #         with st.spinner("Processing"):
+    #             # get pdf text
+    #             raw_text = get_pdf_text(pdf_docs)
 
+    #             # get the text chunks
+    #             text_chunks = get_text_chunks(raw_text)
+
+    #             # create vector store
+        # vectorstore = get_pinconevectorstore(text_chunks)
+    #             print(vectorstore)
+    #             # create conversation chain
+    #             st.session_state.conversation = get_conversation_chain(
+    #                 vectorstore)
 
 
 if __name__ == '__main__':
